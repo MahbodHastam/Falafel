@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Falafel - browser to browser file transfer</title>
+    <meta
+      name="description"
+      content="Send a file directly from one browser to another over WebRTC. The server keeps only the room details."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f29f05" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16100b" media="(prefers-color-scheme: dark)" />
+    <meta property="og:title" content="Falafel - browser to browser file transfer" />
+    <meta
+      property="og:description"
+      content="Send a file directly from one browser to another over WebRTC."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      html { background: #fff9f0; }
+      @media (prefers-color-scheme: dark) { html { background: #16100b; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>Falafel needs JavaScript to transfer files.</noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

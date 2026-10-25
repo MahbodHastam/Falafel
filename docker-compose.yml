@@ -1,0 +1,23 @@
+name: falafel
+
+services:
+  falafel:
+    build: .
+    image: falafel:latest
+    restart: unless-stopped
+    environment:
+      FALAFEL_ADDR: ":8080"
+      FALAFEL_DB_PATH: /data/falafel.db
+      FALAFEL_BASE_URL: ${FALAFEL_BASE_URL:-http://localhost:8080}
+      FALAFEL_TRUST_PROXY: "true"
+      FALAFEL_STUN_URLS: ${FALAFEL_STUN_URLS:-stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302}
+      FALAFEL_TURN_URLS: ${FALAFEL_TURN_URLS:-${FALAFEL_TURN_URL:-}}
+      FALAFEL_TURN_USERNAME: ${FALAFEL_TURN_USERNAME:-}
+      FALAFEL_TURN_CREDENTIAL: ${FALAFEL_TURN_CREDENTIAL:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - falafel-data:/data
+
+volumes:
+  falafel-data:

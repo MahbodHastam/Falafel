@@ -1,0 +1,24 @@
+# Go
+/bin/
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local tool caches
+/.cache/
+
+# Web
+/web/node_modules/
+/web/test-results/
+/web/playwright-report/
+/web/.vite/
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+
+# Environment
+.env
+!.env.example
+
+# macOS
+.DS_Store

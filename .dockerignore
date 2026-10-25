@@ -1,0 +1,14 @@
+.git
+.github
+.cache
+bin
+data
+docs
+web/node_modules
+web/test-results
+web/playwright-report
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+.env
+*.db
+.DS_Store
