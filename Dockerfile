@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=$BUILDPLATFORM node:24-alpine AS client
+FROM --platform=$BUILDPLATFORM node:25-alpine AS client
 WORKDIR /app/web
 RUN npm install -g pnpm@10.29.3
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
