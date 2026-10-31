@@ -19,7 +19,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/falafel ./cmd/falafel
 
-FROM alpine:3.22
+FROM alpine:3.24
 LABEL org.opencontainers.image.title="Falafel" \
       org.opencontainers.image.description="Browser to browser file transfer over WebRTC" \
       org.opencontainers.image.source="https://github.com/MahbodHastam/falafel" \
