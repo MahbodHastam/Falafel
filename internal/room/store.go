@@ -86,9 +86,10 @@ func (s *Store) SetBytes(ctx context.Context, token string, bytes int64) error {
 	return nil
 }
 
-// SetFailedAttempts stores the wrong-password counter shown to the owner.
-func (s *Store) SetFailedAttempts(ctx context.Context, token string, attempts int) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE rooms SET failed_attempts = ? WHERE token = ?`, attempts, token)
+// IncrementFailedAttempts bumps the wrong-password counter shown to the owner.
+// The increment happens in SQL so concurrent failures are not lost.
+func (s *Store) IncrementFailedAttempts(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE rooms SET failed_attempts = failed_attempts + 1 WHERE token = ?`, token)
 	if err != nil {
 		return fmt.Errorf("update failed attempts: %w", err)
 	}

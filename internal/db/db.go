@@ -16,6 +16,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// migrations holds one SQL script per schema version, oldest first. Append new
+// scripts; never edit one that has shipped. schema.sql is version 1 and is
+// idempotent, so databases created before versioning adopt it unchanged.
+var migrations = []string{schema}
+
 //go:embed schema.sql
 var schema string
 
@@ -41,7 +46,7 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	// ponytail: single connection to serialize SQLite writes safely
+	// One connection serializes writes; SQLite would otherwise return SQLITE_BUSY under load.
 	conn.SetMaxOpenConns(1)
 	conn.SetMaxIdleConns(1)
 
@@ -49,11 +54,41 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, schema); err != nil {
+	if err := migrate(ctx, conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, err
 	}
 	return conn, nil
+}
+
+// migrate applies every migration newer than the database's PRAGMA user_version.
+func migrate(ctx context.Context, conn *sql.DB) error {
+	var version int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version > len(migrations) {
+		return fmt.Errorf("database schema version %d is newer than this build supports (%d)", version, len(migrations))
+	}
+	for i := version; i < len(migrations); i++ {
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %w", i+1, err)
+		}
+		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("apply migration %d: %w", i+1, err)
+		}
+		// PRAGMA does not accept bound parameters.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record migration %d: %w", i+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", i+1, err)
+		}
+	}
+	return nil
 }
 
 // SigningKey returns the persisted HMAC key, generating it on first use.

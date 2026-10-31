@@ -11,6 +11,7 @@ import {
 import { PeerLink } from '@/lib/peer'
 import { SignalingClient, SignalingError, type SignalingEvent } from '@/lib/signaling'
 import { createDownloadSink, sanitizeFileName, type DownloadSink } from '@/lib/transfer/sink'
+import { authenticateChannel } from '@/lib/transfer/channel-auth'
 import { FileReceiver } from '@/lib/transfer/receiver'
 
 export type DownloadPhase =
@@ -32,7 +33,7 @@ const TEARDOWN_DELAY_MS = 800
  * Drives the receiving side: load the room, ask for a password when needed,
  * then accept the sender's offer and verify the incoming file.
  */
-export function useDownloadSession(token: string) {
+export function useDownloadSession(token: string, linkKey: string | null) {
   const phase = ref<DownloadPhase>('loading')
   const room = ref<PublicRoom | null>(null)
   const errorCode = ref('')
@@ -98,6 +99,12 @@ export function useDownloadSession(token: string) {
     }
 
     resetProgress()
+    if (!linkKey) {
+      // Without the key from the link's #fragment the sender cannot be verified.
+      errorCode.value = 'link_incomplete'
+      phase.value = 'error'
+      return
+    }
     phase.value = 'starting'
 
     try {
@@ -179,23 +186,44 @@ export function useDownloadSession(token: string) {
     earlyCandidates = []
 
     connection.connection.addEventListener('datachannel', (event) => {
-      if (!sink || !room.value) return
-      channel = event.channel
+      if (!sink || !room.value || !linkKey) return
+      const dataChannel = event.channel
+      channel = dataChannel
       const currentSink = sink
       const total = room.value.fileSize
+      const fingerprints = connection.fingerprints()
+      if (!fingerprints) {
+        fail('verification_failed')
+        return
+      }
 
-      receiver = new FileReceiver(event.channel, currentSink, total, {
-        onProgress(received) {
-          updateProgress(received, total)
+      // The handshake starts synchronously so the sender's first message is not missed.
+      authenticateChannel({
+        channel: dataChannel,
+        key: linkKey,
+        role: 'receiver',
+        senderFingerprint: fingerprints.remote,
+        receiverFingerprint: fingerprints.local,
+      }).then(
+        () => {
+          if (channel !== dataChannel || unmounted) return
+          receiver = new FileReceiver(dataChannel, currentSink, total, {
+            onProgress(received) {
+              updateProgress(received, total)
+            },
+            onComplete(result) {
+              finish(result.sha256, result.size)
+            },
+            onError(code) {
+              fail(code)
+            },
+          })
+          receiver.start()
         },
-        onComplete(result) {
-          finish(result.sha256, result.size)
+        () => {
+          if (channel === dataChannel) fail('verification_failed')
         },
-        onError(code) {
-          fail(code)
-        },
-      })
-      receiver.start()
+      )
     })
 
     try {

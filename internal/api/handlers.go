@@ -23,11 +23,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		servers = append(servers, iceServer{URLs: s.cfg.STUNURLs})
 	}
 	if len(s.cfg.TURNURLs) > 0 {
-		servers = append(servers, iceServer{
-			URLs:       s.cfg.TURNURLs,
-			Username:   s.cfg.TURNUsername,
-			Credential: s.cfg.TURNCredential,
-		})
+		username, credential := s.cfg.TURNUsername, s.cfg.TURNCredential
+		if s.cfg.TURNSecret != "" {
+			username, credential = turnCredentials(s.cfg.TURNSecret, time.Now().Add(s.svc.TTL()))
+		}
+		servers = append(servers, iceServer{URLs: s.cfg.TURNURLs, Username: username, Credential: credential})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"iceServers":        servers,

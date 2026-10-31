@@ -1,5 +1,8 @@
 name: falafel
 
+# Settings come from the environment or a .env file next to this one; see .env.example.
+# The port is published on localhost only. Put a TLS reverse proxy (see
+# Caddyfile.example) in front of it, which is why FALAFEL_TRUST_PROXY defaults to true here.
 services:
   falafel:
     build: .
@@ -9,15 +12,26 @@ services:
       FALAFEL_ADDR: ":8080"
       FALAFEL_DB_PATH: /data/falafel.db
       FALAFEL_BASE_URL: ${FALAFEL_BASE_URL:-http://localhost:8080}
-      FALAFEL_TRUST_PROXY: "true"
-      FALAFEL_STUN_URLS: ${FALAFEL_STUN_URLS:-stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302}
-      FALAFEL_TURN_URLS: ${FALAFEL_TURN_URLS:-${FALAFEL_TURN_URL:-}}
+      FALAFEL_TRUST_PROXY: ${FALAFEL_TRUST_PROXY:-true}
+      FALAFEL_ROOM_TTL: ${FALAFEL_ROOM_TTL:-}
+      FALAFEL_OWNER_GRACE: ${FALAFEL_OWNER_GRACE:-}
+      FALAFEL_RETENTION: ${FALAFEL_RETENTION:-}
+      FALAFEL_MAX_FILE_SIZE: ${FALAFEL_MAX_FILE_SIZE:-}
+      FALAFEL_MIN_PASSWORD_LENGTH: ${FALAFEL_MIN_PASSWORD_LENGTH:-}
+      FALAFEL_SECRET: ${FALAFEL_SECRET:-}
+      FALAFEL_STUN_URLS: ${FALAFEL_STUN_URLS:-}
+      FALAFEL_TURN_URLS: ${FALAFEL_TURN_URLS:-}
+      FALAFEL_TURN_SECRET: ${FALAFEL_TURN_SECRET:-}
       FALAFEL_TURN_USERNAME: ${FALAFEL_TURN_USERNAME:-}
       FALAFEL_TURN_CREDENTIAL: ${FALAFEL_TURN_CREDENTIAL:-}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - falafel-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   falafel-data:

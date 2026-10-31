@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Falafel version
+      description: Output of `falafel -version`, or the image tag.
+    validations:
+      required: true
+  - type: input
+    id: browsers
+    attributes:
+      label: Browsers (sender and receiver)
+      placeholder: Chrome 140 on macOS to Firefox 142 on Android
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network setup
+      options:
+        - Same network
+        - Different networks, no TURN server
+        - Different networks, with TURN server
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs and browser console output
+      description: Remove share links and tokens before pasting.
+      render: text

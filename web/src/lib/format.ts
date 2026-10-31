@@ -25,7 +25,7 @@ export function formatSpeed(bytesPerSecond: number, locale = 'en'): string {
 
 type Translate = (key: string, values?: Record<string, unknown>) => string
 
-export function formatDuration(ms: number, locale = 'en', t: Translate): string {
+export function formatDuration(ms: number, locale: string, t: Translate): string {
   // Under 0.9 s the rounded value would be one second, so say less than a second.
   if (!Number.isFinite(ms) || ms < 900) return t('common.lessThanSecond')
   const total = Math.round(ms / 1000)

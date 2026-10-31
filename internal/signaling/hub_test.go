@@ -261,3 +261,94 @@ func TestOwnerStatusStored(t *testing.T) {
 		t.Fatalf("bytes = %d, want 1024", snapshot.BytesReceived)
 	}
 }
+
+func TestOwnerReconnectWithinGraceKeepsRoom(t *testing.T) {
+	env := newHubEnv(t)
+	created, _ := env.createRoom(t)
+	url := env.wsURL(created.Room.Token)
+	auth := ClientMessage{Type: "auth", Role: RoleOwner, OwnerSecret: created.OwnerSecret}
+
+	first := dialAndAuth(t, url, auth)
+	readMessage(t, first)
+	first.CloseNow()
+
+	time.Sleep(env.grace / 3)
+	second := dialAndAuth(t, url, auth)
+	defer second.CloseNow()
+	if ready := readMessage(t, second); ready.Type != "ready" {
+		t.Fatalf("reconnect = %+v", ready)
+	}
+
+	time.Sleep(env.grace * 2)
+	if _, err := env.svc.Public(context.Background(), created.Room.Token); err != nil {
+		t.Fatalf("room closed despite owner reconnecting: %v", err)
+	}
+}
+
+func TestSecondOwnerRejected(t *testing.T) {
+	env := newHubEnv(t)
+	created, _ := env.createRoom(t)
+	url := env.wsURL(created.Room.Token)
+	auth := ClientMessage{Type: "auth", Role: RoleOwner, OwnerSecret: created.OwnerSecret}
+
+	first := dialAndAuth(t, url, auth)
+	defer first.CloseNow()
+	readMessage(t, first)
+
+	second := dialAndAuth(t, url, auth)
+	defer second.CloseNow()
+	if msg := readMessage(t, second); msg.Type != "error" || msg.Code != "room_busy" {
+		t.Fatalf("second owner = %+v", msg)
+	}
+}
+
+func TestDownloaderLeavingWithoutTransferKeepsRoomJoinable(t *testing.T) {
+	env := newHubEnv(t)
+	created, ticket := env.createRoom(t)
+	url := env.wsURL(created.Room.Token)
+
+	owner := dialAndAuth(t, url, ClientMessage{Type: "auth", Role: RoleOwner, OwnerSecret: created.OwnerSecret})
+	defer owner.CloseNow()
+	readMessage(t, owner)
+	downloader := dialAndAuth(t, url, ClientMessage{Type: "auth", Role: RoleDownloader, Ticket: ticket})
+	readMessage(t, downloader)
+	readMessage(t, owner) // peer-joined
+	downloader.CloseNow()
+
+	if msg := readMessage(t, owner); msg.Type != "peer-left" {
+		t.Fatalf("owner message = %+v", msg)
+	}
+	var status room.Status
+	for i := 0; i < 40; i++ {
+		snapshot, err := env.svc.Owner(context.Background(), created.Room.Token, created.OwnerSecret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status = snapshot.Status; status == room.StatusWaiting {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("status = %q, want waiting", status)
+}
+
+func TestHubForgetsEmptyRooms(t *testing.T) {
+	env := newHubEnv(t)
+	created, ticket := env.createRoom(t)
+	url := env.wsURL(created.Room.Token)
+
+	downloader := dialAndAuth(t, url, ClientMessage{Type: "auth", Role: RoleDownloader, Ticket: ticket})
+	readMessage(t, downloader)
+	downloader.CloseNow()
+
+	for i := 0; i < 40; i++ {
+		env.hub.mu.Lock()
+		n := len(env.hub.rooms)
+		env.hub.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("hub still tracks a room with nobody connected")
+}

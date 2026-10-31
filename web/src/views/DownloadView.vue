@@ -13,6 +13,7 @@ import NotFoundView from '@/views/NotFoundView.vue'
 import { useDownloadSession } from '@/composables/useDownloadSession'
 import { useErrorMessage } from '@/composables/useErrorMessage'
 import { formatBytes, formatDuration, formatPercent, formatSpeed } from '@/lib/format'
+import { parseLinkKey } from '@/lib/transfer/channel-auth'
 
 // Files above this size are written straight to disk when the browser can.
 const LARGE_FILE_BYTES = 256 * 1024 * 1024
@@ -24,7 +25,7 @@ const errorMessage = useErrorMessage()
 
 const token = typeof route.params.token === 'string' ? route.params.token : ''
 const { phase, room, errorCode, retryAfter, bytes, progress, speed, etaMs, elapsedMs, averageSpeed, savedName, size, load, start, cancel, retry } =
-  useDownloadSession(token)
+  useDownloadSession(token, parseLinkKey(route.hash))
 
 const password = ref('')
 const localError = ref('')

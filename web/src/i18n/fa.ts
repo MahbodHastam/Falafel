@@ -6,7 +6,6 @@ export default {
   },
   app: {
     name: 'فلافل',
-    tagline: '',
     repo: 'مشاهده کد در گیت‌هاب',
   },
   nav: {
@@ -162,6 +161,8 @@ export default {
     cancelled: 'انتقال لغو شد.',
     peer_left: 'طرف مقابل قطع شد.',
     metadata_mismatch: 'اطلاعات فایل مطابقت نداشت. انتقال متوقف شد.',
+    verification_failed: 'هویت طرف مقابل تأیید نشد. از لینک اصلی استفاده کن و دوباره تلاش کن.',
+    link_incomplete: 'این لینک ناقص است. کل لینک را، با هر چیزی که بعد از # آمده، کپی کن.',
     generic: 'خطایی رخ داد.',
   },
   notFound: {

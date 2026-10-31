@@ -18,6 +18,7 @@ import {
   type SignalingEvent,
   type SignalData,
 } from '@/lib/signaling'
+import { authenticateChannel, generateLinkKey } from '@/lib/transfer/channel-auth'
 import { FileSender } from '@/lib/transfer/sender'
 
 export type SendPhase =
@@ -34,6 +35,10 @@ export type SendPhase =
 // peer during a transfer gets a short grace period before we call it failed.
 const PEER_LEFT_GRACE_MS = 1200
 
+// The server keeps a room for FALAFEL_OWNER_GRACE (10 s by default) after the
+// sender's socket drops. Reconnect attempts must all land inside that window.
+const RECONNECT_DELAYS_MS = [300, 900, 2000]
+
 /**
  * Drives the sender side: create a room, keep the link alive, and stream the
  * file once the receiver joins.
@@ -49,6 +54,10 @@ export function useSendSession() {
 
   let token = ''
   let ownerSecret = ''
+  // Random key placed in the share link's #fragment; the server never sees it.
+  let linkKey = ''
+  let reconnectAttempts = 0
+  let reconnectTimer: number | undefined
   let signaling: SignalingClient | null = null
   let peer: PeerLink | null = null
   let channel: RTCDataChannel | null = null
@@ -95,7 +104,8 @@ export function useSendSession() {
 
       token = created.token
       ownerSecret = created.ownerSecret
-      shareURL.value = created.url
+      linkKey = generateLinkKey()
+      shareURL.value = `${created.url}#k=${linkKey}`
       peerOnline.value = false
       receivedBytes.value = 0
       room.value = {
@@ -123,6 +133,8 @@ export function useSendSession() {
     signaling.onEvent(handleOwnerEvent)
     void signaling.connect().catch((error) => {
       if (unmounted) return
+      // A dropped reconnect attempt is retried from the `closed` event.
+      if (reconnectAttempts > 0 && error instanceof SignalingError && error.code === 'connection_lost') return
       errorCode.value = mapError(error)
       phase.value = 'failed'
     })
@@ -132,11 +144,14 @@ export function useSendSession() {
     if (unmounted) return
     switch (event.type) {
       case 'ready': {
+        reconnectAttempts = 0
         const snapshot = event.room as OwnerRoom
         room.value = { ...snapshot, events: snapshot.events ?? [] }
-        receivedBytes.value = snapshot.bytesReceived
-        phase.value = snapshot.status === 'completed' ? 'completed' : 'waiting'
+        receivedBytes.value = Math.max(receivedBytes.value, snapshot.bytesReceived)
         peerOnline.value = event.peerOnline
+        // After a socket reconnect the WebRTC connection is still up; leave it alone.
+        if (peer) break
+        phase.value = snapshot.status === 'completed' ? 'completed' : 'waiting'
         if (event.peerOnline) void connectPeer()
         break
       }
@@ -165,6 +180,7 @@ export function useSendSession() {
         mergeStats(event.stats, event.events)
         break
       case 'closed':
+        if (event.reason === 'socket_closed' && scheduleReconnect()) break
         peerOnline.value = false
         resetPeer()
         if (phase.value !== 'completed') phase.value = 'closed'
@@ -174,6 +190,19 @@ export function useSendSession() {
         phase.value = 'failed'
         break
     }
+  }
+
+  // An unexpected socket drop (Wi-Fi blip, laptop sleep) should not end the link.
+  function scheduleReconnect(): boolean {
+    if (unmounted || !token || phase.value === 'completed' || phase.value === 'closed') return false
+    const delay = RECONNECT_DELAYS_MS[reconnectAttempts]
+    if (delay === undefined) return false
+    reconnectAttempts += 1
+    signaling?.close()
+    signaling = null
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = window.setTimeout(openOwnerSocket, delay)
+    return true
   }
 
   function handlePeerLeft(): void {
@@ -220,36 +249,7 @@ export function useSendSession() {
     channel = dataChannel
 
     dataChannel.addEventListener('open', () => {
-      if (!file || !channel || sender) return
-      phase.value = 'transferring'
-      lastStatusAt = 0
-      signaling?.sendStatus('transferring', receivedBytes.value)
-      sender = new FileSender(dataChannel, file, {
-        onAck(bytes) {
-          receivedBytes.value = bytes
-          if (room.value) room.value.bytesReceived = bytes
-          persistProgress(bytes)
-        },
-        onDone() {
-          window.clearTimeout(peerLeftTimer)
-          const total = file?.size ?? 0
-          receivedBytes.value = total
-          if (room.value) {
-            room.value.bytesReceived = total
-            room.value.status = 'completed'
-            room.value.completedAt = new Date().toISOString()
-          }
-          phase.value = 'completed'
-          signaling?.sendStatus('completed', total)
-          resetPeer()
-        },
-        onError(code) {
-          errorCode.value = code
-          phase.value = 'failed'
-          signaling?.sendStatus('failed', receivedBytes.value)
-        },
-      })
-      sender.start()
+      void verifyThenSend(connection, dataChannel)
     })
 
     try {
@@ -258,6 +258,61 @@ export function useSendSession() {
       errorCode.value = 'connection_lost'
       phase.value = 'failed'
     }
+  }
+
+  // Confirms the other end holds the link's key and sees the same DTLS fingerprints
+  // before any file bytes leave this browser.
+  async function verifyThenSend(connection: PeerLink, dataChannel: RTCDataChannel): Promise<void> {
+    if (!file || sender || channel !== dataChannel) return
+    const fingerprints = connection.fingerprints()
+    try {
+      if (!fingerprints || !linkKey) throw new Error('no_fingerprint')
+      await authenticateChannel({
+        channel: dataChannel,
+        key: linkKey,
+        role: 'sender',
+        senderFingerprint: fingerprints.local,
+        receiverFingerprint: fingerprints.remote,
+      })
+    } catch {
+      if (channel !== dataChannel) return
+      resetPeer()
+      errorCode.value = 'verification_failed'
+      phase.value = 'failed'
+      signaling?.sendStatus('failed', receivedBytes.value)
+      return
+    }
+    if (!file || sender || channel !== dataChannel) return
+
+    phase.value = 'transferring'
+    lastStatusAt = 0
+    signaling?.sendStatus('transferring', receivedBytes.value)
+    sender = new FileSender(dataChannel, file, {
+      onAck(bytes) {
+        receivedBytes.value = bytes
+        if (room.value) room.value.bytesReceived = bytes
+        persistProgress(bytes)
+      },
+      onDone() {
+        window.clearTimeout(peerLeftTimer)
+        const total = file?.size ?? 0
+        receivedBytes.value = total
+        if (room.value) {
+          room.value.bytesReceived = total
+          room.value.status = 'completed'
+          room.value.completedAt = new Date().toISOString()
+        }
+        phase.value = 'completed'
+        signaling?.sendStatus('completed', total)
+        resetPeer()
+      },
+      onError(code) {
+        errorCode.value = code
+        phase.value = 'failed'
+        signaling?.sendStatus('failed', receivedBytes.value)
+      },
+    })
+    sender.start()
   }
 
   async function applySignal(data: SignalData): Promise<void> {
@@ -325,6 +380,8 @@ export function useSendSession() {
     signaling = null
     token = ''
     ownerSecret = ''
+    linkKey = ''
+    window.clearTimeout(reconnectTimer)
     try {
       if (closingToken && closingSecret) await closeRoom(closingToken, closingSecret)
     } catch {
@@ -339,6 +396,9 @@ export function useSendSession() {
     signaling = null
     token = ''
     ownerSecret = ''
+    linkKey = ''
+    reconnectAttempts = 0
+    window.clearTimeout(reconnectTimer)
     room.value = null
     shareURL.value = ''
     peerOnline.value = false
@@ -375,6 +435,7 @@ export function useSendSession() {
   onBeforeUnmount(() => {
     unmounted = true
     window.clearTimeout(peerLeftTimer)
+    window.clearTimeout(reconnectTimer)
     const closingToken = token
     const closingSecret = ownerSecret
     resetPeer()

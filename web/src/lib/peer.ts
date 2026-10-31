@@ -1,4 +1,5 @@
 import type { SignalData } from './signaling'
+import { dtlsFingerprint } from './transfer/channel-auth'
 
 /**
  * A single WebRTC connection plus the ICE bookkeeping both sides need.
@@ -69,6 +70,13 @@ export class PeerLink {
       return
     }
     this.pendingCandidates.push(candidate)
+  }
+
+  /** DTLS fingerprints of both ends, or null until both descriptions are set. */
+  fingerprints(): { local: string; remote: string } | null {
+    const local = dtlsFingerprint(this.connection.localDescription?.sdp ?? '')
+    const remote = dtlsFingerprint(this.connection.remoteDescription?.sdp ?? '')
+    return local && remote ? { local, remote } : null
   }
 
   close(): void {

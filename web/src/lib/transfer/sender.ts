@@ -2,9 +2,11 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 
 import {
+  ACK_WINDOW,
   CHUNK_SIZE,
   HIGH_WATER,
   LOW_WATER,
+  READ_BLOCK_SIZE,
   encodeControl,
   parseControl,
 } from './protocol'
@@ -15,19 +17,33 @@ export interface FileSenderHandlers {
   onError(code: string): void
 }
 
+export interface FileSenderOptions {
+  ackWindow?: number
+}
+
 export class FileSender {
   private readonly channel: RTCDataChannel
   private readonly file: File
   private readonly handlers: FileSenderHandlers
+  private readonly ackWindow: number
 
   private started = false
   // Set once the transfer ends for any reason: completed, failed, or cancelled.
   private stopped = false
+  private sent = 0
+  private acked = 0
+  private windowWaiter: (() => void) | null = null
 
-  constructor(channel: RTCDataChannel, file: File, handlers: FileSenderHandlers) {
+  constructor(
+    channel: RTCDataChannel,
+    file: File,
+    handlers: FileSenderHandlers,
+    options: FileSenderOptions = {},
+  ) {
     this.channel = channel
     this.file = file
     this.handlers = handlers
+    this.ackWindow = options.ackWindow ?? ACK_WINDOW
   }
 
   start(): void {
@@ -55,6 +71,7 @@ export class FileSender {
   abort(): void {
     this.stopped = true
     this.detach()
+    this.releaseWindow()
   }
 
   private handleMessage = (event: MessageEvent): void => {
@@ -63,13 +80,16 @@ export class FileSender {
     if (!message) return
     if (message.type === 'ack') {
       // An ack can briefly overshoot the file size, and progress must not exceed 100%.
-      this.handlers.onAck(Math.min(message.bytes, this.file.size))
+      this.acked = Math.max(this.acked, Math.min(message.bytes, this.file.size))
+      this.handlers.onAck(this.acked)
+      this.releaseWindow()
       return
     }
     if (message.type === 'done') {
       if (message.ok) {
         this.stopped = true
         this.detach()
+        this.releaseWindow()
         this.handlers.onDone()
       } else {
         this.fail(message.error === 'hash_mismatch' ? 'hash_mismatch' : 'save_failed')
@@ -84,27 +104,28 @@ export class FileSender {
   private async pump(): Promise<void> {
     // Hash while sending so the digest is ready when the last chunk leaves.
     const hasher = sha256.create()
-    let offset = 0
     try {
-      while (offset < this.file.size) {
+      for (let offset = 0; offset < this.file.size; offset += READ_BLOCK_SIZE) {
         if (this.stopped) return
-        if (this.channel.readyState !== 'open') {
-          this.fail('connection_lost')
-          return
+        const block = await this.file
+          .slice(offset, Math.min(offset + READ_BLOCK_SIZE, this.file.size))
+          .arrayBuffer()
+        // The transfer may have been cancelled or disconnected while reading the block.
+        if (this.stopped) return
+        hasher.update(new Uint8Array(block))
+
+        for (let at = 0; at < block.byteLength; at += CHUNK_SIZE) {
+          await this.waitForDrain()
+          await this.waitForWindow()
+          if (this.stopped) return
+          if (this.channel.readyState !== 'open') {
+            this.fail('connection_lost')
+            return
+          }
+          const chunk = block.slice(at, at + CHUNK_SIZE)
+          this.channel.send(chunk)
+          this.sent += chunk.byteLength
         }
-        const end = Math.min(offset + CHUNK_SIZE, this.file.size)
-        const buffer = await this.file.slice(offset, end).arrayBuffer()
-        // The transfer may have been cancelled or disconnected while reading the slice.
-        if (this.stopped) return
-        hasher.update(new Uint8Array(buffer))
-        await this.waitForDrain()
-        if (this.stopped) return
-        if (this.channel.readyState !== 'open') {
-          this.fail('connection_lost')
-          return
-        }
-        this.channel.send(buffer)
-        offset = end
       }
       this.sendControl({ type: 'end', sha256: bytesToHex(hasher.digest()) })
     } catch {
@@ -131,6 +152,21 @@ export class FileSender {
     })
   }
 
+  // Waits for the receiver to catch up. Acks, abort, completion and failure all wake it.
+  private async waitForWindow(): Promise<void> {
+    while (!this.stopped && this.sent - this.acked > this.ackWindow) {
+      await new Promise<void>((resolve) => {
+        this.windowWaiter = resolve
+      })
+    }
+  }
+
+  private releaseWindow(): void {
+    const waiter = this.windowWaiter
+    this.windowWaiter = null
+    waiter?.()
+  }
+
   private sendControl(message: Parameters<typeof encodeControl>[0]): void {
     if (this.channel.readyState === 'open') {
       this.channel.send(encodeControl(message))
@@ -142,6 +178,7 @@ export class FileSender {
     if (this.stopped) return
     this.stopped = true
     this.detach()
+    this.releaseWindow()
     this.handlers.onError(code)
   }
 

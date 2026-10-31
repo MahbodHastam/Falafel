@@ -16,12 +16,7 @@ const repoURL = 'https://github.com/MahbodHastam/falafel'
       <LogoMark
         class="h-9 w-9 transition-transform duration-300 group-hover:-rotate-6 group-hover:scale-105"
       />
-      <span class="flex flex-col leading-tight">
-        <span class="text-base font-extrabold tracking-tight">{{ t('app.name') }}</span>
-        <span v-if="t('app.tagline')" class="hidden text-[0.65rem] font-medium text-ink-soft sm:block">
-          {{ t('app.tagline') }}
-        </span>
-      </span>
+      <span class="text-base font-extrabold leading-tight tracking-tight">{{ t('app.name') }}</span>
     </RouterLink>
 
     <span class="h-5 w-px bg-falafel-900/10" aria-hidden="true" />

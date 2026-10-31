@@ -7,11 +7,24 @@ export interface DownloadSink {
 // Large files go through the file picker so they never sit in memory as one blob.
 const FS_THRESHOLD = 256 * 1024 * 1024
 
+const MAX_NAME_LENGTH = 200
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
+
+// Makes a sender-supplied name safe to hand to the OS: no path separators, control
+// or direction-override characters (which can disguise "fdp.exe" as "exe.pdf"),
+// no Windows reserved names or trailing dots, and a bounded length.
 export function sanitizeFileName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001f\u007f]/g, '')
+  let cleaned = name
+    .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '')
     .replace(/[\\/:*?"<>|]/g, '_')
     .trim()
+    .replace(/[. ]+$/, '')
+  if (WINDOWS_RESERVED.test(cleaned)) cleaned = `_${cleaned}`
+  if (cleaned.length > MAX_NAME_LENGTH) {
+    const dot = cleaned.lastIndexOf('.')
+    const ext = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : ''
+    cleaned = cleaned.slice(0, MAX_NAME_LENGTH - ext.length) + ext
+  }
   return cleaned || 'falafel-file'
 }
 
@@ -37,10 +50,16 @@ export async function createDownloadSink(
   return new BlobSink(safeName, mimeType)
 }
 
+// Chunks are folded into a Blob every FOLD_BYTES. Browsers keep large Blobs in
+// disk-backed storage, so this keeps the JavaScript heap small on browsers that
+// lack the File System Access API.
+const FOLD_BYTES = 64 * 1024 * 1024
+
 class BlobSink implements DownloadSink {
   private readonly name: string
   private readonly type: string
-  private chunks: ArrayBuffer[] = []
+  private parts: BlobPart[] = []
+  private pending = 0
   private finished = false
 
   constructor(name: string, type: string) {
@@ -50,20 +69,25 @@ class BlobSink implements DownloadSink {
 
   async write(chunk: ArrayBuffer): Promise<void> {
     if (this.finished) throw new Error('sink_closed')
-    this.chunks.push(chunk)
+    this.parts.push(chunk)
+    this.pending += chunk.byteLength
+    if (this.pending >= FOLD_BYTES) {
+      this.parts = [new Blob(this.parts)]
+      this.pending = 0
+    }
   }
 
   async close(): Promise<void> {
     if (this.finished) return
     this.finished = true
-    const blob = new Blob(this.chunks, { type: this.type })
-    this.chunks = []
+    const blob = new Blob(this.parts, { type: this.type })
+    this.parts = []
     triggerDownload(blob, this.name)
   }
 
   async abort(): Promise<void> {
     this.finished = true
-    this.chunks = []
+    this.parts = []
   }
 }
 

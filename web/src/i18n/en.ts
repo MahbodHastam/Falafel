@@ -6,7 +6,6 @@ export default {
   },
   app: {
     name: 'Falafel',
-    tagline: '',
     repo: 'View source on GitHub',
   },
   nav: {
@@ -162,6 +161,8 @@ export default {
     cancelled: 'Transfer cancelled.',
     peer_left: 'The other side disconnected.',
     metadata_mismatch: 'The file details did not match. Transfer stopped.',
+    verification_failed: 'Could not verify the other side. Use the original link and try again.',
+    link_incomplete: 'This link is incomplete. Copy the full link, including everything after the #.',
     generic: 'Something went wrong.',
   },
   notFound: {

@@ -24,6 +24,11 @@ describe('control protocol', () => {
     })
   })
 
+  it('parses the channel authentication message', () => {
+    expect(parseControl('{"type":"auth","mac":"ab12"}')).toEqual({ type: 'auth', mac: 'ab12' })
+    expect(parseControl('{"type":"auth"}')).toBeNull()
+  })
+
   it('rejects malformed payloads', () => {
     expect(parseControl('not json')).toBeNull()
     expect(parseControl('null')).toBeNull()

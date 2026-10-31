@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -64,15 +65,15 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				s.log.Error("panic recovered", "value", v, "path", r.URL.Path)
+				s.log.Error("panic recovered", "value", v, "path", maskTokenPath(r.URL.Path))
 				writeError(w, http.StatusInternalServerError, "internal_error")
 			}
 		}()
 
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		h.Set("Content-Security-Policy", s.contentSecurityPolicy(r))
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 
@@ -134,28 +135,62 @@ func (s *Server) externalBaseURL(r *http.Request) string {
 			scheme = proto
 		}
 	}
-	host := r.Host
-	if s.cfg.TrustProxy {
-		if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
-			host = strings.TrimSpace(strings.Split(forwarded, ",")[0])
-		}
-	}
-	return scheme + "://" + host
+	return scheme + "://" + s.requestHost(r)
 }
 
-func clientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
-				return first
-			}
+// requestHost is the host the browser used, honouring X-Forwarded-Host behind a trusted proxy.
+func (s *Server) requestHost(r *http.Request) string {
+	if s.cfg.TrustProxy {
+		if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
+			return strings.TrimSpace(strings.Split(forwarded, ",")[0])
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	return r.Host
+}
+
+// contentSecurityPolicy names the WebSocket origin explicitly because Safari
+// does not match 'self' against ws: and wss: on every release.
+func (s *Server) contentSecurityPolicy(r *http.Request) string {
+	host := s.requestHost(r)
+	if strings.ContainsAny(host, " ;,'\"") {
+		host = ""
 	}
-	return host
+	connect := "'self'"
+	if host != "" {
+		connect += " ws://" + host + " wss://" + host
+	}
+	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+		"font-src 'self'; connect-src " + connect + "; media-src 'self' blob:; object-src 'none'; " +
+		"base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+}
+
+// clientIP returns the rate-limit key for a request. Behind a trusted proxy it
+// uses the last X-Forwarded-For entry, the address that proxy itself saw; earlier
+// entries are client-supplied. IPv6 addresses collapse to their /64 so a client
+// cannot dodge limits by rotating addresses inside its own prefix.
+func clientIP(r *http.Request, trustProxy bool) string {
+	raw := ""
+	if trustProxy {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			raw = strings.TrimSpace(parts[len(parts)-1])
+		}
+	}
+	if raw == "" {
+		raw = r.RemoteAddr
+		if host, _, err := net.SplitHostPort(raw); err == nil {
+			raw = host
+		}
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return raw
+	}
+	addr = addr.Unmap()
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().Addr().String()
+	}
+	return addr.String()
 }
 
 func bearerToken(r *http.Request) (string, bool) {
@@ -170,7 +205,7 @@ func bearerToken(r *http.Request) (string, bool) {
 func maskTokenPath(path string) string {
 	parts := strings.Split(path, "/")
 	for i := 0; i < len(parts)-1; i++ {
-		if (parts[i] == "rooms" || parts[i] == "ws") && parts[i+1] != "" {
+		if (parts[i] == "rooms" || parts[i] == "ws" || parts[i] == "download") && parts[i+1] != "" {
 			parts[i+1] = "{token}"
 		}
 	}

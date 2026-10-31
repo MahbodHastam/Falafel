@@ -34,7 +34,6 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name = "index.html"
 	}
 
-	// ponytail: stdlib fs.ReadFile handles open, read and close in one call
 	if data, err := fs.ReadFile(h.fsys, name); err == nil {
 		if strings.HasPrefix(name, "assets/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")

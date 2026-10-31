@@ -4,14 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+// maxConcurrentHashes caps simultaneous argon2id runs, each of which holds 64 MiB.
+const maxConcurrentHashes = 4
 
 // Options configures the room service.
 type Options struct {
@@ -27,6 +32,8 @@ type Service struct {
 	key   []byte
 	opts  Options
 	now   func() time.Time
+	// hashSlots bounds memory spent on password hashing under parallel requests.
+	hashSlots chan struct{}
 }
 
 // NewService builds a service and defaults the ticket lifetime to two minutes.
@@ -34,7 +41,24 @@ func NewService(store *Store, signingKey []byte, opts Options) *Service {
 	if opts.TicketTTL <= 0 {
 		opts.TicketTTL = 2 * time.Minute
 	}
-	return &Service{store: store, key: signingKey, opts: opts, now: time.Now}
+	slots := min(maxConcurrentHashes, runtime.NumCPU())
+	return &Service{
+		store:     store,
+		key:       signingKey,
+		opts:      opts,
+		now:       time.Now,
+		hashSlots: make(chan struct{}, max(1, slots)),
+	}
+}
+
+// acquireHashSlot blocks until an argon2id run may start and returns its release func.
+func (s *Service) acquireHashSlot(ctx context.Context) (func(), error) {
+	select {
+	case s.hashSlots <- struct{}{}:
+		return func() { <-s.hashSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // SetClock overrides the clock (tests only).
@@ -42,7 +66,7 @@ func (s *Service) SetClock(now func() time.Time) { s.now = now }
 
 // Create validates input and persists a new room.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*CreatedRoom, error) {
-	fileName, mimeType, passwordHash, err := s.validateCreate(in)
+	fileName, mimeType, passwordHash, err := s.validateCreate(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +100,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*CreatedRoom, err
 }
 
 // validateCreate checks the request and returns the normalized name, MIME type and password hash.
-func (s *Service) validateCreate(in CreateInput) (fileName, mimeType, passwordHash string, err error) {
+func (s *Service) validateCreate(ctx context.Context, in CreateInput) (fileName, mimeType, passwordHash string, err error) {
 	fileName = strings.TrimSpace(in.FileName)
 	if fileName == "" {
 		return "", "", "", &ValidationError{Field: "fileName", Reason: "required"}
@@ -85,7 +109,7 @@ func (s *Service) validateCreate(in CreateInput) (fileName, mimeType, passwordHa
 		return "", "", "", &ValidationError{Field: "fileName", Reason: "too_long"}
 	}
 	for _, r := range fileName {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || isBidiOverride(r) {
 			return "", "", "", &ValidationError{Field: "fileName", Reason: "control_characters"}
 		}
 	}
@@ -111,7 +135,12 @@ func (s *Service) validateCreate(in CreateInput) (fileName, mimeType, passwordHa
 		if length > 128 {
 			return "", "", "", &ValidationError{Field: "password", Reason: "too_long"}
 		}
+		release, err := s.acquireHashSlot(ctx)
+		if err != nil {
+			return "", "", "", err
+		}
 		passwordHash, err = hashPassword(in.Password)
+		release()
 		if err != nil {
 			return "", "", "", err
 		}
@@ -135,14 +164,26 @@ func (s *Service) Join(ctx context.Context, token, password string) (*Ticket, er
 	if err != nil {
 		return nil, err
 	}
-	if r.PasswordHash != "" && !verifyPassword(password, r.PasswordHash) {
-		attempts := r.FailedAttempts + 1
-		if err := s.store.SetFailedAttempts(ctx, token, attempts); err != nil {
+	if r.PasswordHash != "" {
+		release, err := s.acquireHashSlot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ok := verifyPassword(password, r.PasswordHash)
+		release()
+		if ok {
+			return s.mintTicket(token)
+		}
+		if err := s.store.IncrementFailedAttempts(ctx, token); err != nil {
 			return nil, err
 		}
 		_ = s.store.AddEvent(ctx, token, EventWrongPassword, nil, s.now().UTC())
 		return nil, ErrWrongPassword
 	}
+	return s.mintTicket(token)
+}
+
+func (s *Service) mintTicket(token string) (*Ticket, error) {
 	value, expires, err := mintTicket(s.key, token, s.opts.TicketTTL, s.now())
 	if err != nil {
 		return nil, err
@@ -168,7 +209,7 @@ func (s *Service) Owner(ctx context.Context, token, ownerSecret string) (*OwnerR
 	if err != nil {
 		return nil, err
 	}
-	if hashSecret(ownerSecret) != r.OwnerSecretHash {
+	if !ownerMatches(ownerSecret, r) {
 		return nil, ErrUnauthorized
 	}
 	events, err := s.store.Events(ctx, token, 50)
@@ -193,7 +234,7 @@ func (s *Service) IsOwner(ctx context.Context, token, ownerSecret string) (bool,
 	if err != nil {
 		return false, err
 	}
-	return hashSecret(ownerSecret) == r.OwnerSecretHash, nil
+	return ownerMatches(ownerSecret, r), nil
 }
 
 // Close ends a room on behalf of its owner.
@@ -202,7 +243,7 @@ func (s *Service) Close(ctx context.Context, token, ownerSecret string) error {
 	if err != nil {
 		return err
 	}
-	if hashSecret(ownerSecret) != r.OwnerSecretHash {
+	if !ownerMatches(ownerSecret, r) {
 		return ErrUnauthorized
 	}
 	if r.Status == StatusClosed || r.Status == StatusExpired || r.Status == StatusCompleted {
@@ -280,6 +321,23 @@ func (s *Service) MarkCompleted(ctx context.Context, token string, bytes int64) 
 	return s.store.AddEvent(ctx, token, EventTransferCompleted, nil, now)
 }
 
+// DownloaderLeft handles the receiver disconnecting without completing. Only a
+// transfer in progress counts as failed; a receiver that merely looked at the
+// page returns the room to waiting.
+func (s *Service) DownloaderLeft(ctx context.Context, token string) error {
+	r, err := s.store.Get(ctx, token)
+	if err != nil {
+		return err
+	}
+	switch r.Status {
+	case StatusTransferring:
+		return s.MarkFailed(ctx, token, "downloader_left")
+	case StatusPaired:
+		return s.store.UpdateStatus(ctx, token, StatusWaiting, s.now().UTC())
+	}
+	return nil
+}
+
 // MarkFailed marks a dropped transfer as failed unless the room already ended.
 func (s *Service) MarkFailed(ctx context.Context, token string, reason string) error {
 	r, err := s.store.Get(ctx, token)
@@ -354,6 +412,18 @@ func randomToken(size int) (string, error) {
 		return "", fmt.Errorf("generate token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// ownerMatches compares an owner secret to the stored hash in constant time.
+func ownerMatches(secret string, r *Room) bool {
+	return subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(r.OwnerSecretHash)) == 1
+}
+
+// isBidiOverride reports Unicode directional overrides and isolates, which can
+// make "fdp.exe" display as "exe.pdf". Plain LRM, RLM and ZWNJ stay allowed
+// because Persian and Arabic file names use them.
+func isBidiOverride(r rune) bool {
+	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // hashSecret stores owner secrets as SHA-256 hex.

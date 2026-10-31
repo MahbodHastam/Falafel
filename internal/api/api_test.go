@@ -281,6 +281,7 @@ func TestMaskTokenPath(t *testing.T) {
 		"/api/rooms/abc123/join":  "/api/rooms/{token}/join",
 		"/api/rooms/abc123/owner": "/api/rooms/{token}/owner",
 		"/api/ws/abc123":          "/api/ws/{token}",
+		"/download/abc123":        "/download/{token}",
 		"/api/config":             "/api/config",
 		"/healthz":                "/healthz",
 	}

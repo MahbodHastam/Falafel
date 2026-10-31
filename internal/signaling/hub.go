@@ -235,7 +235,7 @@ func (h *Hub) handle(c *conn, msg ClientMessage) {
 			return
 		}
 		if err := h.svc.CloseByToken(context.Background(), c.token); err != nil {
-			h.logger.Warn("owner cancel failed", "token", c.token, "error", err)
+			h.logger.Warn("owner cancel failed", "error", err)
 		}
 		h.CloseRoom(c.token, "owner_closed")
 	default:
@@ -252,7 +252,7 @@ func (h *Hub) handleStatus(c *conn, msg ClientMessage) {
 
 	if msg.Phase == "completed" {
 		if err := h.svc.MarkCompleted(ctx, c.token, msg.Bytes); err != nil && !errors.Is(err, room.ErrNotFound) {
-			h.logger.Warn("mark completed", "token", c.token, "error", err)
+			h.logger.Warn("mark completed", "error", err)
 		}
 		h.markCompleted(c.token)
 		h.NotifyStats(c.token)
@@ -266,24 +266,36 @@ func (h *Hub) handleStatus(c *conn, msg ClientMessage) {
 	switch msg.Phase {
 	case "transferring":
 		if err := h.svc.MarkTransferring(ctx, c.token); err != nil && !errors.Is(err, room.ErrNotFound) {
-			h.logger.Warn("mark transferring", "token", c.token, "error", err)
+			h.logger.Warn("mark transferring", "error", err)
 		}
 		if err := h.svc.SetProgress(ctx, c.token, msg.Bytes); err != nil && !errors.Is(err, room.ErrNotFound) {
-			h.logger.Warn("set progress", "token", c.token, "error", err)
+			h.logger.Warn("set progress", "error", err)
 		}
 	case "failed":
 		if err := h.svc.MarkFailed(ctx, c.token, "transfer_error"); err != nil && !errors.Is(err, room.ErrNotFound) {
-			h.logger.Warn("mark failed", "token", c.token, "error", err)
+			h.logger.Warn("mark failed", "error", err)
 		}
 		h.NotifyStats(c.token)
 	}
 }
 
-// attach registers a connection and builds its ready payload.
+// attach registers a connection and builds its ready payload. Room data is
+// loaded before taking the hub lock so a slow query cannot stall other rooms.
 func (h *Hub) attach(token, role string, c *conn, ownerSecret string) (*ServerMessage, bool, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	ctx := context.Background()
 
+	var snapshot any
+	var err error
+	if role == RoleOwner {
+		snapshot, err = h.svc.Owner(ctx, token, ownerSecret)
+	} else {
+		snapshot, err = h.svc.Public(ctx, token)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	h.mu.Lock()
 	p := h.rooms[token]
 	if p == nil {
 		p = &peers{}
@@ -292,6 +304,7 @@ func (h *Hub) attach(token, role string, c *conn, ownerSecret string) (*ServerMe
 
 	if role == RoleOwner {
 		if p.owner != nil {
+			h.mu.Unlock()
 			return nil, false, errRoomBusy
 		}
 		if p.closeTimer != nil {
@@ -300,39 +313,26 @@ func (h *Hub) attach(token, role string, c *conn, ownerSecret string) (*ServerMe
 		}
 		p.ownerLeft = nil
 		p.owner = c
-		owner, err := h.svc.Owner(context.Background(), token, ownerSecret)
-		if err != nil {
-			p.owner = nil
-			return nil, false, err
-		}
-		return &ServerMessage{
-			Type:       "ready",
-			Role:       role,
-			Room:       owner,
-			PeerOnline: p.downloader != nil,
-		}, false, nil
+		peerOnline := p.downloader != nil
+		h.mu.Unlock()
+		return &ServerMessage{Type: "ready", Role: role, Room: snapshot, PeerOnline: peerOnline}, false, nil
 	}
 
 	if p.downloader != nil {
+		h.mu.Unlock()
 		return nil, false, errRoomBusy
-	}
-	pub, err := h.svc.Public(context.Background(), token)
-	if err != nil {
-		return nil, false, err
 	}
 	p.downloader = c
 	p.completed = false
-	if p.owner != nil {
-		if err := h.svc.MarkPaired(context.Background(), token); err != nil {
-			h.logger.Warn("mark paired failed", "token", token, "error", err)
+	ownerOnline := p.owner != nil
+	h.mu.Unlock()
+
+	if ownerOnline {
+		if err := h.svc.MarkPaired(ctx, token); err != nil {
+			h.logger.Warn("mark paired failed", "error", err)
 		}
 	}
-	return &ServerMessage{
-		Type:       "ready",
-		Role:       role,
-		Room:       pub,
-		PeerOnline: p.owner != nil,
-	}, p.owner != nil, nil
+	return &ServerMessage{Type: "ready", Role: role, Room: snapshot, PeerOnline: ownerOnline}, ownerOnline, nil
 }
 
 // detach removes a connection and starts the owner grace timer when needed.
@@ -367,12 +367,15 @@ func (h *Hub) detach(token, role string, c *conn) {
 	}
 	p.downloader = nil
 	completed := p.completed
+	if p.owner == nil && p.closeTimer == nil {
+		delete(h.rooms, token)
+	}
 	h.mu.Unlock()
 
 	if !completed {
-		if err := h.svc.MarkFailed(context.Background(), token, "downloader_left"); err != nil &&
+		if err := h.svc.DownloaderLeft(context.Background(), token); err != nil &&
 			!errors.Is(err, room.ErrNotFound) {
-			h.logger.Warn("mark failed", "token", token, "error", err)
+			h.logger.Warn("downloader left", "error", err)
 		}
 	}
 	h.sendToOther(token, RoleDownloader, ServerMessage{Type: "peer-left", Reason: "downloader_left"})
@@ -391,7 +394,7 @@ func (h *Hub) closeIfOwnerGone(token string, mark *disconnect) {
 	h.mu.Unlock()
 
 	if err := h.svc.CloseByToken(context.Background(), token); err != nil {
-		h.logger.Warn("close room after owner left", "token", token, "error", err)
+		h.logger.Warn("close room after owner left", "error", err)
 	}
 	if downloader != nil {
 		_ = downloader.write(ServerMessage{Type: "closed", Reason: "owner_left"})

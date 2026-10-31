@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,20 +25,21 @@ type Config struct {
 	TURNURLs          []string
 	TURNUsername      string
 	TURNCredential    string
+	TURNSecret        string
 	Secret            string
 	TrustProxy        bool
 }
 
 // Load reads configuration from environment variables, applying defaults.
 func Load() (cfg Config, err error) {
-	// ponytail: stdlib env parsing with single-pass defaults
 	cfg.Addr = env("FALAFEL_ADDR", ":8080")
 	cfg.DBPath = env("FALAFEL_DB_PATH", "./data/falafel.db")
 	cfg.BaseURL = strings.TrimRight(env("FALAFEL_BASE_URL", ""), "/")
 	cfg.STUNURLs = splitList(env("FALAFEL_STUN_URLS", "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"))
-	cfg.TURNURLs = splitList(env("FALAFEL_TURN_URLS", env("FALAFEL_TURN_URL", "")))
+	cfg.TURNURLs = splitList(env("FALAFEL_TURN_URLS", ""))
 	cfg.TURNUsername = env("FALAFEL_TURN_USERNAME", "")
 	cfg.TURNCredential = env("FALAFEL_TURN_CREDENTIAL", "")
+	cfg.TURNSecret = env("FALAFEL_TURN_SECRET", "")
 	cfg.Secret = env("FALAFEL_SECRET", "")
 	cfg.TrustProxy = envBool("FALAFEL_TRUST_PROXY", false)
 
@@ -70,12 +72,17 @@ func Load() (cfg Config, err error) {
 		return Config{}, errors.New("FALAFEL_MIN_PASSWORD_LENGTH must be between 1 and 128")
 	case cfg.RoomTTL <= 0:
 		return Config{}, errors.New("FALAFEL_ROOM_TTL must be positive")
-	case cfg.BaseURL != "" && !strings.HasPrefix(cfg.BaseURL, "http"):
-		return Config{}, errors.New("FALAFEL_BASE_URL must start with http:// or https://")
-	case len(cfg.TURNURLs) > 0 && cfg.TURNUsername == "":
-		return Config{}, errors.New("FALAFEL_TURN_USERNAME is required when FALAFEL_TURN_URLS is set")
+	case cfg.BaseURL != "" && !validBaseURL(cfg.BaseURL):
+		return Config{}, errors.New("FALAFEL_BASE_URL must be an http:// or https:// URL with a host")
+	case len(cfg.TURNURLs) > 0 && cfg.TURNSecret == "" && (cfg.TURNUsername == "" || cfg.TURNCredential == ""):
+		return Config{}, errors.New("FALAFEL_TURN_URLS needs FALAFEL_TURN_SECRET, or FALAFEL_TURN_USERNAME and FALAFEL_TURN_CREDENTIAL")
 	}
 	return cfg, nil
+}
+
+func validBaseURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 func env(key, fallback string) string {

@@ -7,8 +7,17 @@ export type Locale = (typeof SUPPORTED_LOCALES)[number]
 
 const STORAGE_KEY = 'falafel.locale'
 
+// Storage throws when site data is blocked (some private modes), and the app must still start.
+function readSavedLocale(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
 function initialLocale(): Locale {
-  const saved = localStorage.getItem(STORAGE_KEY)
+  const saved = readSavedLocale()
   if (saved === 'en' || saved === 'fa') return saved
   const browser = navigator.language.toLowerCase()
   return browser.startsWith('fa') ? 'fa' : 'en'
@@ -27,7 +36,11 @@ export function currentLocale(): Locale {
 
 export function setLocale(locale: Locale): void {
   i18n.global.locale.value = locale
-  localStorage.setItem(STORAGE_KEY, locale)
+  try {
+    localStorage.setItem(STORAGE_KEY, locale)
+  } catch {
+    // The choice still applies for this visit.
+  }
   applyDocumentLocale(locale)
 }
 

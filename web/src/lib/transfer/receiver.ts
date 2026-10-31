@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 
 import type { DownloadSink } from './sink'
-import { encodeControl, parseControl } from './protocol'
+import { ACK_INTERVAL_MS, ACK_STEP, encodeControl, parseControl } from './protocol'
 
 export interface FileReceiverHandlers {
   onProgress(bytes: number, total: number): void
@@ -18,7 +18,11 @@ export class FileReceiver {
 
   private hasher = sha256.create()
   private bytes = 0
-  private lastAck = 0
+  // Bytes the sink has finished writing; acks report this, not bytes received,
+  // so the sender slows down when the disk is the bottleneck.
+  private written = 0
+  private ackedBytes = 0
+  private lastAckAt = 0
   private writeChain: Promise<void> = Promise.resolve()
   private sinkFailed = false
   private finished = false
@@ -92,11 +96,14 @@ export class FileReceiver {
     this.hasher.update(new Uint8Array(buffer))
     // Sink writes run one at a time, so a slow disk cannot reorder chunks.
     this.writeChain = this.writeChain
-      .then(() => this.sink.write(buffer))
+      .then(async () => {
+        await this.sink.write(buffer)
+        this.written += buffer.byteLength
+        this.sendAck(false)
+      })
       .catch(() => {
         this.sinkFailed = true
       })
-    this.sendAck(false)
     this.handlers.onProgress(this.bytes, this.expectedSize)
   }
 
@@ -133,6 +140,7 @@ export class FileReceiver {
       return
     }
 
+    this.written = this.bytes
     this.sendAck(true)
     this.sendDone(true)
     this.handlers.onComplete({ sha256: digest, size: this.bytes })
@@ -157,11 +165,16 @@ export class FileReceiver {
 
   private sendAck(force: boolean): void {
     const now = Date.now()
-    // Throttle acks so a fast transfer does not flood the control channel; `force` skips it.
-    if (!force && now - this.lastAck < 250) return
-    this.lastAck = now
+    // Ack every ACK_STEP bytes or ACK_INTERVAL_MS, whichever comes first, so a fast
+    // transfer does not flood the control channel; `force` skips the throttle.
+    const due =
+      this.written - this.ackedBytes >= ACK_STEP ||
+      (this.written > this.ackedBytes && now - this.lastAckAt >= ACK_INTERVAL_MS)
+    if (!force && !due) return
+    this.lastAckAt = now
+    this.ackedBytes = this.written
     if (this.channel.readyState === 'open') {
-      this.channel.send(encodeControl({ type: 'ack', bytes: this.bytes }))
+      this.channel.send(encodeControl({ type: 'ack', bytes: this.written }))
     }
   }
 

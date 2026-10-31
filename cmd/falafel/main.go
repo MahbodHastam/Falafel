@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,7 +21,16 @@ import (
 	"github.com/mahbodhastam/falafel/internal/web"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("falafel", version)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("falafel stopped", "error", err)
 		os.Exit(1)
@@ -74,7 +85,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("falafel listening", "addr", cfg.Addr, "baseURL", cfg.BaseURL)
+		logger.Info("falafel listening", "version", version, "addr", cfg.Addr, "baseURL", cfg.BaseURL)
 		errCh <- server.ListenAndServe()
 	}()
 

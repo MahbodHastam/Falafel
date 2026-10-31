@@ -23,7 +23,7 @@ async function startSending(page: Page): Promise<string> {
   const linkField = page.locator('#share-url')
   await expect(linkField).toBeVisible({ timeout: 30_000 })
   const link = await linkField.inputValue()
-  expect(link).toMatch(/\/download\/[A-Za-z0-9_-]+$/)
+  expect(link).toMatch(/\/download\/[A-Za-z0-9_-]+#k=[A-Za-z0-9_-]{22,}$/)
   return link
 }
 
@@ -96,6 +96,26 @@ test('password protects the transfer and records wrong attempts', async ({ brows
   await receiverContext.close()
 })
 
+test('refuses a link whose key fragment was stripped', async ({ browser }) => {
+  const senderContext = await browser.newContext()
+  const receiverContext = await browser.newContext()
+  const sender = await senderContext.newPage()
+  const receiver = await receiverContext.newPage()
+
+  await sender.goto('/')
+  await selectFile(sender, 'saffron.txt', Buffer.from('no key, no file'))
+  const link = await startSending(sender)
+
+  await receiver.goto(link.split('#')[0])
+  await expect(receiver.getByText('saffron.txt')).toBeVisible()
+  await receiver.getByRole('button', { name: 'Start download' }).click()
+  await expect(receiver.getByText('This link is incomplete.', { exact: false })).toBeVisible()
+  await expect(sender.getByText('Transfer complete', { exact: true })).toBeHidden()
+
+  await senderContext.close()
+  await receiverContext.close()
+})
+
 test('closing the sender page kills the link', async ({ browser }) => {
   const senderContext = await browser.newContext()
   const sender = await senderContext.newPage()
@@ -110,6 +130,8 @@ test('closing the sender page kills the link', async ({ browser }) => {
   await expect
     .poll(
       async () => {
+        // The link ends in a #fragment, so a plain repeat goto would not reload the page.
+        await visitor.goto('about:blank')
         await visitor.goto(link)
         return visitor.getByText('Link not found').isVisible()
       },
